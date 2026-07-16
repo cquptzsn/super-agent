@@ -18,6 +18,7 @@ const rl = createInterface({
   output: process.stdout,
 })
 
+// 保存对话历史，用户问一句就 push 一句，AI 回答一次也 push 一次
 const modelMessages: ModelMessage[] = []; 
 
 function ask() {
@@ -38,7 +39,8 @@ function ask() {
     let modelAnswerText = ''
     const result = streamText({
       model,
-      prompt: modelMessages
+      system: '你是 Super Agent，一个专注于软件开发的 AI 助手。你说话简洁直接，喜欢用代码示例来解释问题。如果用户的问题不够清晰，你会反问而不是瞎猜',
+      messages: modelMessages
     })
 
     console.log(); // 强制输入和模型输出中间换个行
