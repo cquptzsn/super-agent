@@ -5,6 +5,7 @@ import { createMockModel } from './mock-model';
 import { createInterface } from 'node:readline'
 import { weatherTool, calculatorTool } from './tools/utility-tools';
 import { agentLoop } from './agent/loop';
+import { Budget } from './agent/loop';
 
 const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。
@@ -20,6 +21,9 @@ const model = process.env.DASHSCOPE_API_KEY
   : createMockModel();
 
 const tools = { get_weather: weatherTool, caulate: calculatorTool }
+
+// 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
+const budget: Budget = { used: 0, limit: 15000 };
 
 const rl = createInterface({
   input: process.stdin,
@@ -48,7 +52,8 @@ function ask() {
       messages: modelMessages,
       model,
       system: SYSTEM,
-      tools
+      tools,
+      budget
     })
 
     console.log() // 换行

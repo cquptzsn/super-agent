@@ -3,17 +3,24 @@ import { detect, recordCall, recordResult, resetHistory } from '../loop-detectio
 import { isRetryable, calculateDelay, sleep }  from '../retry'
 
 const MAX_STEPS = 15;
-const MAX_RETRIES = 30000;
+const MAX_RETRIES = 5;
+
+export interface Budget {
+  used: number
+  limit: number
+}
 
 interface AgentLoopParams {
   model: any
+  /** 对话、模型生成历史 */
   messages: ModelMessage[]
   system: string
   tools: any
+  budget: Budget
 }
 
 export async function agentLoop(parasm: AgentLoopParams) {
-  const { model,messages, system, tools } = parasm;
+  const { model, messages, system, tools, budget } = parasm;
   let step = 0;
   resetHistory();
 
@@ -26,6 +33,7 @@ export async function agentLoop(parasm: AgentLoopParams) {
     let shouldBreak = false;
     let lastToolCall: { name: string, input: unknown } | null = null
     let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
+    let stepUsage: Awaited<ReturnType<typeof streamText>['usage']>;
     
     const result = streamText({ model, system, tools, messages, maxRetries: 0,
       providerOptions: { openai: { parallelToolCalls: true } }, onError: () => {} });
@@ -70,6 +78,7 @@ export async function agentLoop(parasm: AgentLoopParams) {
 
         // 这里的 stepMessages.messages 是一个数组，包含模型在这一步产生的所有消息：模型恢复、工具调用、工具调用结果等...
         stepResponse = await result.response;
+        stepUsage = await result.usage;
         break;
       } catch (error) {
         console.log('error => ', JSON.stringify(error))
@@ -87,7 +96,20 @@ export async function agentLoop(parasm: AgentLoopParams) {
     }
     
 
-    messages.push(...stepResponse.messages)
+    messages.push(...stepResponse.messages);
+
+    // Token 预算追踪：budget 由调用方持有，跨轮持续累计
+    // @ts-ignore
+    const inp = typeof stepUsage?.inputTokens === 'number' ? stepUsage.inputTokens : (stepUsage?.inputTokens?.total ?? 0);
+    // @ts-ignore
+    const out = typeof stepUsage?.outputTokens === 'number' ? stepUsage.outputTokens : (stepUsage?.outputTokens?.total ?? 0);
+    budget.used = inp + out;
+    const pct = Math.round(budget.used / budget.limit*100);
+    console.log(`[Token] ${budget.used}/${budget.used} (${pct}%)`);
+    if (budget.used > budget.limit) {
+      console.log('\n[Token 预算耗尽，强制停止]');
+      break;
+    }
 
     if (!hasToolCall) {
       break;
