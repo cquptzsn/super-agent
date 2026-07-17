@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 
+// 简单的循环检测！！！！！！！！！！！！！！！！！！！！！ 
+// 避免：模型在不断地做事，但没有任何进展，在原地打转。
+
 // --- 类型定义 ---
 
 export interface ToolCallRecord {

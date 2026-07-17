@@ -1,7 +1,9 @@
 import { ModelMessage, streamText } from "ai";
 import { detect, recordCall, recordResult, resetHistory } from '../loop-detection'
+import { isRetryable, calculateDelay, sleep }  from '../retry'
 
 const MAX_STEPS = 15;
+const MAX_RETRIES = 30000;
 
 interface AgentLoopParams {
   model: any
@@ -23,48 +25,59 @@ export async function agentLoop(parasm: AgentLoopParams) {
     let hasToolCall = false;
     let shouldBreak = false;
     let lastToolCall: { name: string, input: unknown } | null = null
+    let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
     
-    const result = streamText({
-      model,
-      messages,
-      system,
-      tools,
-      maxRetries: 0,
-      onError: () => {},
-    })
+    const result = streamText({ model, system, tools, messages, maxRetries: 0,
+      providerOptions: { openai: { parallelToolCalls: true } }, onError: () => {} });
 
-    for await (const part of result.fullStream) {
-      switch (part.type) {
-        case 'text-delta':
-          process.stdout.write(part.text);
-          modelAnswerText = modelAnswerText + part.text
-          break;
-
-        case 'tool-call': 
-          console.log(`\n 调用工具：${part.toolName}, 传入的参数为：${JSON.stringify(part.input)}`);
-          hasToolCall = true;
-          lastToolCall = { name: part.toolName, input: part.input }
-          const detection = detect(part.toolName, part.input)
-          if (detection.stuck) {
-            console.log(detection.message);
-            if (detection.level === 'critical') {
-              shouldBreak = true;
-            } else {
-              messages.push({
-                role: 'user' as const,
-                content: `系统提醒：${detection.message}。请换个解决思路，不要重复同样的操作。`
-              })
-            }
+    // API 容错，步骤级重试
+    for (let attempt = 1; ; attempt++) {
+      try {
+        for await (const part of result.fullStream) {
+          switch (part.type) {
+            case 'text-delta':
+              process.stdout.write(part.text);
+              modelAnswerText = modelAnswerText + part.text
+              break;
+    
+            case 'tool-call': 
+              console.log(`\n 调用工具：${part.toolName}, 传入的参数为：${JSON.stringify(part.input)}`);
+              hasToolCall = true;
+              lastToolCall = { name: part.toolName, input: part.input }
+              const detection = detect(part.toolName, part.input)
+              if (detection.stuck) {
+                console.log(detection.message);
+                if (detection.level === 'critical') {
+                  shouldBreak = true;
+                } else {
+                  messages.push({
+                    role: 'user' as const,
+                    content: `系统提醒：${detection.message}。请换个解决思路，不要重复同样的操作。`
+                  })
+                }
+              }
+              recordCall(part.toolName, part.input)
+              break;
+    
+            case 'tool-result':
+              console.log(`\n 工具调用完成：${part.toolName}, 调用结果为：${JSON.stringify(part.output)}`);
+              if (lastToolCall) {
+                recordResult(part.toolName, part.input, part.output);
+              }
+              break;
           }
-          recordCall(part.toolName, part.input)
-          break;
+        } 
 
-        case 'tool-result':
-          console.log(`\n 工具调用完成：${part.toolName}, 调用结果为：${JSON.stringify(part.output)}`);
-          if (lastToolCall) {
-            recordResult(part.toolName, part.input, part.output);
-          }
-          break;
+        // 这里的 stepMessages.messages 是一个数组，包含模型在这一步产生的所有消息：模型恢复、工具调用、工具调用结果等...
+        stepResponse = await result.response;
+        break;
+      } catch (error) {
+        console.log('error => ', JSON.stringify(error))
+        if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw error;
+        const delay = calculateDelay(attempt);
+        console.log(`  [重试] 第 ${attempt}/${MAX_RETRIES} 次失败，${delay}ms 后重试...`);
+        await sleep(delay);
+        hasToolCall = false; modelAnswerText = ''; shouldBreak = false; lastToolCall = null;
       }
     }
 
@@ -72,10 +85,9 @@ export async function agentLoop(parasm: AgentLoopParams) {
       console.log(`\n [循环检测触发，Agent 已停止]`);
       break;
     }
+    
 
-    const stepMessages = await result.response
-    // 这里的 stepMessages.messages 是一个数组，包含模型在这一步产生的所有消息：模型恢复、工具调用、工具调用结果等...
-    messages.push(...stepMessages.messages)
+    messages.push(...stepResponse.messages)
 
     if (!hasToolCall) {
       break;
