@@ -1,8 +1,14 @@
 import 'dotenv/config';
-import { streamText, type ModelMessage } from 'ai';
+import { type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createMockModel } from './mock-model';
 import { createInterface } from 'node:readline'
+import { weatherTool, calculatorTool } from './tools/utility-tools';
+import { agentLoop } from './agent/loop';
+
+const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
+需要查询信息时，主动使用工具，不要编造数据。
+回答要简洁直接。`;
 
 const qwen = createOpenAI({
   baseURL: 'https://ws-abofm7lurquo3pjb.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
@@ -12,6 +18,8 @@ const qwen = createOpenAI({
 const model = process.env.DASHSCOPE_API_KEY
   ? qwen.chat('qwen-plus-latest')
   : createMockModel();
+
+const tools = { get_weather: weatherTool, caulate: calculatorTool }
 
 const rl = createInterface({
   input: process.stdin,
@@ -36,26 +44,14 @@ function ask() {
       content: trimedInput
     })
   
-    let modelAnswerText = ''
-    const result = streamText({
+    await agentLoop({
+      messages: modelMessages,
       model,
-      system: '你是 Super Agent，一个专注于软件开发的 AI 助手。你说话简洁直接，喜欢用代码示例来解释问题。如果用户的问题不够清晰，你会反问而不是瞎猜',
-      messages: modelMessages
+      system: SYSTEM,
+      tools
     })
 
-    console.log(); // 强制输入和模型输出中间换个行
-  
-    for await (const chunk of result.textStream) {
-      modelAnswerText = modelAnswerText + chunk
-      process.stdout.write(chunk);
-    }
-    
-
-    // 这里把模型的回答保存
-    modelMessages.push({
-      role: 'assistant',
-      content: modelAnswerText
-    })
+    console.log() // 换行
 
     ask();
 
