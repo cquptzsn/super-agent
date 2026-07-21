@@ -111,7 +111,7 @@ export async function agentLoop(parasm: AgentLoopParams) {
     const out = typeof stepUsage?.outputTokens === 'number' ? stepUsage.outputTokens : (stepUsage?.outputTokens?.total ?? 0);
     budget.used = inp + out;
     const pct = Math.round(budget.used / budget.limit*100);
-    console.log(`[Token] ${budget.used}/${budget.limit} (${pct}%)`);
+    console.log(`\n[Token] ${budget.used}/${budget.limit} (${pct}%)`);
     if (budget.used > budget.limit) {
       console.log('\n[Token 预算耗尽，强制停止]');
       break;
