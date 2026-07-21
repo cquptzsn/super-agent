@@ -3,9 +3,10 @@ import { type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createMockModel } from './mock-model';
 import { createInterface } from 'node:readline'
-import { weatherTool, calculatorTool } from './tools/utility-tools';
+import { allTools } from './tools/utility-tools';
 import { agentLoop } from './agent/loop';
 import { Budget } from './agent/loop';
+import { ToolRegistry } from './tool-registry';
 
 const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。
@@ -20,7 +21,16 @@ const model = process.env.DASHSCOPE_API_KEY
   ? qwen.chat('qwen-plus-latest')
   : createMockModel();
 
-const tools = { get_weather: weatherTool, caulate: calculatorTool }
+const toolRegister = new ToolRegistry()
+toolRegister.register(...allTools);
+console.log(`已注册 ${toolRegister.getAll().length} 个工具：`)
+for (const tool of toolRegister.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? '可并发' : '串行',
+    tool.isReadOnly ? '只读' : '读写',
+  ].join(', ');
+  console.log(`  - ${tool.name}（${flags}）`);
+}
 
 // 预算由调用方持有，跨轮持续累计——agentLoop 只负责消费它
 const budget: Budget = { used: 0, limit: 15000 };
@@ -52,7 +62,7 @@ function ask() {
       messages: modelMessages,
       model,
       system: SYSTEM,
-      tools,
+      registry: toolRegister,
       budget
     })
 

@@ -1,6 +1,7 @@
 import { ModelMessage, streamText } from "ai";
 import { detect, recordCall, recordResult, resetHistory } from '../loop-detection'
 import { isRetryable, calculateDelay, sleep }  from '../retry'
+import { ToolRegistry } from "../tool-registry";
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 5;
@@ -15,12 +16,12 @@ interface AgentLoopParams {
   /** 对话、模型生成历史 */
   messages: ModelMessage[]
   system: string
-  tools: any
+  registry: ToolRegistry
   budget: Budget
 }
 
 export async function agentLoop(parasm: AgentLoopParams) {
-  const { model, messages, system, tools, budget } = parasm;
+  const { model, messages, system, registry, budget } = parasm;
   let step = 0;
   resetHistory();
 
@@ -35,7 +36,12 @@ export async function agentLoop(parasm: AgentLoopParams) {
     let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
     let stepUsage: Awaited<ReturnType<typeof streamText>['usage']>;
     
-    const result = streamText({ model, system, tools, messages, maxRetries: 0,
+    const result = streamText({ 
+      model, 
+      system, 
+      tools: registry.toAISDKFormat(),
+      messages, 
+      maxRetries: 0,
       providerOptions: { openai: { parallelToolCalls: true } }, onError: () => {} });
 
     // API 容错，步骤级重试
@@ -105,7 +111,7 @@ export async function agentLoop(parasm: AgentLoopParams) {
     const out = typeof stepUsage?.outputTokens === 'number' ? stepUsage.outputTokens : (stepUsage?.outputTokens?.total ?? 0);
     budget.used = inp + out;
     const pct = Math.round(budget.used / budget.limit*100);
-    console.log(`[Token] ${budget.used}/${budget.used} (${pct}%)`);
+    console.log(`[Token] ${budget.used}/${budget.limit} (${pct}%)`);
     if (budget.used > budget.limit) {
       console.log('\n[Token 预算耗尽，强制停止]');
       break;
