@@ -63,7 +63,7 @@ export class ToolRegistry {
 
   /** 获取独占锁：必须等所有共享锁释放、且没人持独占 */
   private async acquireExclusive(): Promise<void> {
-    while (this.acquireExclusive || this.concurrentCount > 0) {
+    while (this.exclusiveLock || this.concurrentCount > 0) {
       await new Promise<void>(r => this.waitQueue.push(r));
     };
     this.exclusiveLock = true;
