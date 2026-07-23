@@ -1,22 +1,132 @@
-// ！！！！工具的 description 和 inputSchema 的 description 本质上就是在写 prompt，
-// 写得越清楚、越具体，模型调用的准确率越高
-
-import { jsonSchema } from 'ai';
-import { ToolDefinition, } from '../tool-registry';
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
-import fg from 'fast-glob';
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
+import { join, resolve, relative, dirname, extname } from 'node:path';
 import { execSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
+import { ToolDefinition } from '../tool-registry';
 
-/**
- * desc: 模拟的一个供模型使用的天气查询工具
- * 一个工具主要包含 3 部分：
- * description: 告诉模型这个工具是干啥的（模型靠这个判断什么时候可以调用这个工具）
- * inputSchema: 告诉模型这个工具接收什么参数（通过 JSON Schema 定义）
- * execute: 实际执行函数
- */
+// ── 上一篇已有的工具 ─────────────────────────────
 
-/** 精确编辑文件的某部分内容，而不是重写整个文件，节约 token */
+export const weatherTool: ToolDefinition = {
+  name: 'get_weather',
+  description: '查询指定城市的天气信息',
+  parameters: {
+    type: 'object',
+    properties: {
+      city: { type: 'string', description: '城市名称，如"北京"、"上海"' },
+    },
+    required: ['city'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  execute: async ({ city }: { city: string }) => {
+    const data: Record<string, string> = {
+      '北京': '晴，15-25°C，东南风 2 级',
+      '上海': '多云，18-22°C，西南风 3 级',
+      '深圳': '阵雨，22-28°C，南风 2 级',
+      '广州': '多云转晴，20-28°C，东风 3 级',
+      '杭州': '晴，14-24°C，北风 2 级',
+      '成都': '阴，16-22°C，微风',
+    };
+    return data[city] || `${city}：暂无数据`;
+  },
+};
+
+export const calculatorTool: ToolDefinition = {
+  name: 'calculator',
+  description: '计算数学表达式的结果。当用户提问涉及数学运算时使用',
+  parameters: {
+    type: 'object',
+    properties: {
+      expression: { type: 'string', description: '数学表达式，如 "2 + 3 * 4"' },
+    },
+    required: ['expression'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  execute: async ({ expression }: { expression: string }) => {
+    try {
+      const result = new Function(`return ${expression}`)();
+      return `${expression} = ${result}`;
+    } catch {
+      return `无法计算: ${expression}`;
+    }
+  },
+};
+
+export const readFileTool: ToolDefinition = {
+  name: 'read_file',
+  description: '读取指定路径的文件内容',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: '文件路径' },
+    },
+    required: ['path'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 3000,
+  execute: async ({ path }: { path: string }) => {
+    const resolved = resolve(path);
+    if (!existsSync(resolved)) return `文件不存在: ${path}`;
+    return readFileSync(resolved, 'utf-8');
+  },
+};
+
+export const writeFileTool: ToolDefinition = {
+  name: 'write_file',
+  description: '写入内容到指定文件。如果文件已存在则覆盖',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: '文件路径' },
+      content: { type: 'string', description: '要写入的内容' },
+    },
+    required: ['path', 'content'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: false,
+  isReadOnly: false,
+  execute: async ({ path, content }: { path: string; content: string }) => {
+    const resolved = resolve(path);
+    mkdirSync(dirname(resolved), { recursive: true });
+    writeFileSync(resolved, content, 'utf-8');
+    return `已写入 ${content.length} 字符到 ${path}`;
+  },
+};
+
+export const listDirectoryTool: ToolDefinition = {
+  name: 'list_directory',
+  description: '列出指定目录下的文件和子目录',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: '目录路径，默认为当前目录' },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  execute: async ({ path = '.' }: { path?: string }) => {
+    const resolved = resolve(path);
+    if (!existsSync(resolved)) return `目录不存在: ${path}`;
+    return readdirSync(resolved).map(name => {
+      try {
+        const stat = statSync(join(resolved, name));
+        return `${stat.isDirectory() ? '[DIR]' : '[FILE]'} ${name}`;
+      } catch {
+        return `[?] ${name}`;
+      }
+    }).join('\n');
+  },
+};
+
+// ── 本篇新增的工具 ─────────────────────────────
+
 export const editFileTool: ToolDefinition = {
   name: 'edit_file',
   description: '精确替换文件中的指定内容。用 old_string 定位要替换的文本，用 new_string 替换它。不是全量覆写——只改你指定的部分',
@@ -32,7 +142,7 @@ export const editFileTool: ToolDefinition = {
   },
   isConcurrencySafe: false,
   isReadOnly: false,
-  execute: async ({ path, old_string, new_string }) => {
+  execute: async ({ path, old_string, new_string }: { path: string; old_string: string; new_string: string }) => {
     const resolved = resolve(path);
     if (!existsSync(resolved)) return `文件不存在: ${path}`;
 
@@ -52,117 +162,6 @@ export const editFileTool: ToolDefinition = {
   },
 };
 
-
-export const weatherTool: ToolDefinition = {
-  name: 'get_weather',
-  description: '查询指定城市的天气信息',
-  parameters: {
-    type: 'object',
-    properties: {
-      city: { type: 'string', description: '城市名称，如"北京"、"上海"' },
-    },
-    required: ['city'],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ city }: { city: string }) => {
-    const data: Record<string, string> = {
-      '北京': '大雨，15-25°C，东南风 2 级',
-      '上海': '多云，18-22°C，西南风 3 级',
-      '深圳': '阵雨，22-28°C，南风 2 级',
-    };
-    return data[city] || `${city}：暂无数据`;
-  },
-};
-
-export const readFileTool: ToolDefinition = {
-  name: 'read_file',
-  description: '读取指定路径的文件内容',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: '文件路径' },
-    },
-    required: ['path'],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  maxResultChars: 500,  // 演示用，生产环境通常 50000+
-  execute: async ({ path }: { path: string }) => {
-    return readFileSync(resolve(path), 'utf-8');
-  },
-};
-
-export const writeFileTool: ToolDefinition = {
-  name: 'write_file',
-  description: '写入内容到指定文件',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: '文件路径' },
-      content: { type: 'string', description: '要写入的内容' },
-    },
-    required: ['path', 'content'],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: false,  // 写操作不能并行
-  isReadOnly: false,
-  execute: async ({ path, content }: { path: string; content: string }) => {
-    writeFileSync(resolve(path), content, 'utf-8');
-    return `已写入 ${content.length} 字符到 ${path}`;
-  },
-};
-
-// 这个工具只会只列一层目录
-export const listDirectoryTool: ToolDefinition = {
-  name: 'list_directory',
-  description: '列出指定目录下的文件和子目录',
-  parameters: {
-    type: 'object',
-    properties: {
-      path: { type: 'string', description: '目录路径，默认为当前目录' },
-    },
-    required: [],
-    additionalProperties: false,
-  },
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ path = '.' }: { path?: string }) => {
-    const resolved = resolve(path);
-    return readdirSync(resolved).map(name => {
-      const stat = statSync(join(resolved, name));
-      return `${stat.isDirectory() ? '[DIR]' : '[FILE]'} ${name}`;
-    }).join('\n');
-  },
-};
-
-export const calculatorTool: ToolDefinition = {
-  name: 'calculatorTool',
-  description: '计算数学表达式的结果。当用户提问涉及数学运算时使用',
-  parameters: jsonSchema({
-    type: 'object',
-    properties: {
-      expression: { type: 'string', description: '数学表达式，如 "2 + 3 * 4"' },
-    },
-    required: ['expression'],
-    additionalProperties: false,
-  }),
-  isConcurrencySafe: true,
-  isReadOnly: true,
-  execute: async ({ expression }: { expression: string }) => {
-    try {
-      // 生产环境不要用 eval，这里纯粹为了演示
-      const result = new Function(`return ${expression}`)();
-      return `${expression} = ${result}`;
-    } catch {
-      return `无法计算: ${expression}`;
-    }
-  },
-};
-
-// 和 readdirSync 的区别是「可递归搜索整个目录树」
 export const globTool: ToolDefinition = {
   name: 'glob',
   description: '按模式搜索文件。支持 * 和 ** 通配符，如 "src/**/*.ts" 匹配 src 下所有 TypeScript 文件',
@@ -178,19 +177,41 @@ export const globTool: ToolDefinition = {
   isConcurrencySafe: true,
   isReadOnly: true,
   execute: async ({ pattern, path = '.' }: { pattern: string; path?: string }) => {
-    const results = await fg(pattern, {
-      cwd: resolve(path),
-      ignore: ['node_modules/**', '.git/**'],
-      dot: false,
-      onlyFiles: true,
-      followSymbolicLinks: false,
-    });
+    const baseDir = resolve(path);
+    const results: string[] = [];
+    const regexStr = pattern
+      .replace(/\./g, '\\.')
+      .replace(/\*\*/g, '<<<GLOBSTAR>>>')
+      .replace(/\*/g, '[^/]*')
+      .replace(/<<<GLOBSTAR>>>/g, '.*');
+    const regex = new RegExp(`^${regexStr}$`);
+
+    function walk(dir: string) {
+      if (results.length >= 100) return;
+      let entries: string[];
+      try { entries = readdirSync(dir); } catch { return; }
+
+      for (const name of entries) {
+        if (name === 'node_modules' || name === '.git') continue;
+        const full = join(dir, name);
+        const rel = relative(baseDir, full);
+        try {
+          const stat = statSync(full);
+          if (stat.isDirectory()) {
+            walk(full);
+          } else if (regex.test(rel)) {
+            results.push(rel);
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    walk(baseDir);
     if (results.length === 0) return `没有找到匹配 "${pattern}" 的文件`;
     return results.sort().join('\n');
   },
 };
 
-/** 内容搜索 */
 export const grepTool: ToolDefinition = {
   name: 'grep',
   description: '在文件中搜索匹配指定模式的内容。返回匹配的行号和内容',
@@ -260,7 +281,6 @@ export const grepTool: ToolDefinition = {
   },
 };
 
-/** 命令执行 */
 export const bashTool: ToolDefinition = {
   name: 'bash',
   description: '执行 shell 命令并返回输出。适合运行脚本、检查环境、执行构建等操作',
@@ -275,35 +295,162 @@ export const bashTool: ToolDefinition = {
   isConcurrencySafe: false,
   isReadOnly: false,
   maxResultChars: 3000,
-  execute: async ({ command }) => {
-    // 先检测环境是否支持 child_process
+  execute: async ({ command }: { command: string }) => {
     try {
       execSync('echo test', { stdio: 'ignore' });
     } catch {
-      return `[bash 不可用] 当前环境不支持 shell 命令。本地终端运行可使用。`;
+      return `[bash 不可用] 当前环境（WebContainer）不支持 shell 命令。本地终端运行 pnpm start 可使用 bash 工具。`;
     }
 
     try {
       const output = execSync(command, {
         encoding: 'utf-8',
-        timeout: 10000,  // 10 秒超时
+        timeout: 10000,
         maxBuffer: 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       return output || '(命令执行成功，无输出)';
     } catch (err: any) {
-      return `命令执行失败 (exit ${err.status || 1}):\n${err.stderr || err.message}`;
+      const stderr = err.stderr || '';
+      const stdout = err.stdout || '';
+      return `命令执行失败 (exit ${err.status || 1}):\n${stderr || stdout || err.message}`;
     }
   },
 };
 
+// 演示用预定义内容：教学场景里保证可重现，避免外网抖动
+const MOCK_PAGES: Record<string, string> = {
+  'https://esm.sh': `esm.sh - 一个免费的 ES module CDN。直接 import "https://esm.sh/react@18" 就能用最新版 React，自动处理依赖打包、TypeScript 支持和 JSX 转换，配合浏览器 import maps 可以零构建运行 React 项目。`,
+
+  'https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling': `AI SDK Core - Tools and Tool Calling
+工具是模型可以决定调用的函数。一个工具由三部分组成：
+- description：告诉模型何时使用这个工具
+- inputSchema：通过 Zod 或 JSON Schema 定义参数
+- execute：实际在服务端运行的函数
+
+通过 stopWhen: stepCountIs(N) 实现多步工具执行。
+当模型在一个 step 中发出多个 tool-call 时，工具会默认并行执行。`,
+
+  'https://ai-sdk.dev/docs/ai-sdk-core/generating-text': `AI SDK Core - Generating Text
+streamText() 返回流式响应，包含文本和工具调用的增量更新。
+通过 fullStream 可以拿到所有事件类型：text-delta、tool-call、tool-result、finish。
+generateText() 是非流式版本，最终返回完整结果。`,
+};
+
+export const fetchUrlTool: ToolDefinition = {
+  name: 'fetch_url',
+  description: '抓取指定 URL 的网页内容并转换为纯文本（自动剥离 HTML 标签）。让 Agent 阅读外部资料、文档、博客',
+  parameters: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: '完整 URL，必须以 http:// 或 https:// 开头' },
+    },
+    required: ['url'],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: true,
+  isReadOnly: true,
+  maxResultChars: 1500,
+  execute: async ({ url }: { url: string }) => {
+    for (const key of Object.keys(MOCK_PAGES)) {
+      if (url.startsWith(key)) return MOCK_PAGES[key];
+    }
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 SuperAgent' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) return `请求失败：HTTP ${res.status}`;
+      const html = await res.text();
+      return html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim() || '页面无文本内容';
+    } catch (err: any) {
+      return `抓取失败：${err.message}`;
+    }
+  },
+};
+
+// ── Vibe Coding 配套：起一个静态服务器把 app/ 暴露到 localhost ──
+
+let previewServer: Server | null = null;
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.tsx': 'application/javascript; charset=utf-8',
+  '.ts': 'application/javascript; charset=utf-8',
+  '.jsx': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+};
+
+export const startPreviewTool: ToolDefinition = {
+  name: 'start_preview',
+  description: '启动 app/ 目录的预览服务器，让浏览器能访问生成的网页应用。生成应用文件后必须立即调用此工具',
+  parameters: {
+    type: 'object',
+    properties: {
+      port: { type: 'number', description: '端口号，默认 8080' },
+    },
+    required: [],
+    additionalProperties: false,
+  },
+  isConcurrencySafe: false,
+  isReadOnly: false,
+  execute: async ({ port = 8080 }: { port?: number } = {}) => {
+    const root = resolve('app');
+    if (!existsSync(root)) return '错误：app/ 目录不存在，请先用 write_file 生成应用文件';
+
+    if (previewServer) return `预览服务器已在运行 → http://localhost:${port}`;
+
+    previewServer = createServer((req, res) => {
+      const urlPath = (req.url?.split('?')[0] || '/').replace(/\/$/, '/index.html');
+      const filePath = join(root, urlPath === '/' ? '/index.html' : urlPath);
+      try {
+        if (!filePath.startsWith(root)) { res.writeHead(403); res.end('Forbidden'); return; }
+        const content = readFileSync(filePath);
+        res.writeHead(200, {
+          'Content-Type': MIME[extname(filePath).toLowerCase()] || 'application/octet-stream',
+          'Cache-Control': 'no-cache',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(content);
+      } catch {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    });
+
+    return new Promise<string>((resolve, reject) => {
+      previewServer!.once('error', (err: any) => {
+        if (err.code === 'EADDRINUSE') resolve(`端口 ${port} 已被占用，预览可能已经在跑了`);
+        else reject(err);
+      });
+      previewServer!.listen(port, () => {
+        resolve(`✓ 预览服务器已启动 → http://localhost:${port}（点击 WebContainer 的 Preview 标签查看）`);
+      });
+    });
+  },
+};
+
 export const allTools: ToolDefinition[] = [
-  weatherTool, 
-  calculatorTool, 
-  readFileTool, 
-  writeFileTool, 
-  listDirectoryTool, 
+  weatherTool,
+  calculatorTool,
+  readFileTool,
+  writeFileTool,
+  listDirectoryTool,
   editFileTool,
   globTool,
   grepTool,
-  bashTool
+  bashTool,
+  fetchUrlTool,
+  startPreviewTool,
 ];
