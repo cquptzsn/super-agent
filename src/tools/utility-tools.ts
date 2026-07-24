@@ -3,6 +3,7 @@ import { join, resolve, relative, dirname, extname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { ToolDefinition } from '../tool-registry';
+import { pickSearchTool, webFetchTool } from './search-tools';
 
 // ── 上一篇已有的工具 ─────────────────────────────
 
@@ -453,4 +454,6 @@ export const allTools: ToolDefinition[] = [
   bashTool,
   fetchUrlTool,
   startPreviewTool,
+  pickSearchTool(),
+  webFetchTool
 ];
